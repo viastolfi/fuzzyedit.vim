@@ -103,11 +103,20 @@ augroup END
 " cnoremap (not cmap): avoids any interaction with other user mappings
 " on the same keys, which would otherwise stay inactive while our popup
 " is open, as expected.
+" <Tab>/<S-Tab> are NOT mapped here unlike the others: <Tab> is Vim's
+" 'wildchar' (native cmdline completion trigger). Keeping a permanent
+" cnoremap <expr> <Tab> -- even one whose fallback branch returns
+" "\<Tab>" -- permanently breaks wildchar completion for EVERY command
+" (":set wi<Tab>", ":color <Tab>", ...), not just :e: once Vim resolves
+" the key through a mapping, the returned "\<Tab>" is reinserted as a
+" plain character, it no longer re-triggers the special wildchar
+" handling, so it just inserts a literal Tab instead of completing.
+" These two are installed/removed dynamically instead, only while our
+" popup is actually visible: see s:enable_tab_mapping()/
+" s:disable_tab_mapping() in popup.vim, called from show()/close().
 cnoremap <expr> <Down>  fuzzyedit#cmdline#on_next("\<Down>")
 cnoremap <expr> <C-n>   fuzzyedit#cmdline#on_next("\<C-n>")
 cnoremap <expr> <Up>    fuzzyedit#cmdline#on_prev("\<Up>")
 cnoremap <expr> <C-p>   fuzzyedit#cmdline#on_prev("\<C-p>")
-cnoremap <expr> <Tab>   fuzzyedit#cmdline#on_tab()
-cnoremap <expr> <S-Tab> fuzzyedit#cmdline#on_shift_tab()
 cnoremap <expr> <CR>    fuzzyedit#cmdline#on_cr()
 cnoremap <expr> <Esc>   fuzzyedit#cmdline#on_esc()

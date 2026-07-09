@@ -10,6 +10,37 @@
 " Id of the currently open popup, 0 if none.
 let s:popup_id = 0
 
+" Whether we currently own the <Tab>/<S-Tab> cmdline mappings. <Tab> is
+" Vim's 'wildchar' (native command-line completion trigger): as soon as
+" ANY cnoremap exists on it, Vim never re-enters its special wildchar
+" handling for the rest of the cmdline session, even if the mapping's
+" <expr> ultimately returns "\<Tab>" as a fallback (that only reinserts
+" a literal Tab byte, it does not replay completion). So instead of
+" mapping <Tab>/<S-Tab> permanently (see plugin/fuzzyedit.vim), we bind
+" them only for the window during which our popup is actually on
+" screen, and remove them the instant it closes: this way plain
+" ":command<Tab>" completion is completely unaffected the rest of the
+" time (see s:enable_tab_mapping()/s:disable_tab_mapping() below).
+let s:tab_mapped = v:false
+
+function! s:enable_tab_mapping() abort
+  if s:tab_mapped
+    return
+  endif
+  cnoremap <expr> <Tab>   fuzzyedit#cmdline#on_tab()
+  cnoremap <expr> <S-Tab> fuzzyedit#cmdline#on_shift_tab()
+  let s:tab_mapped = v:true
+endfunction
+
+function! s:disable_tab_mapping() abort
+  if !s:tab_mapped
+    return
+  endif
+  silent! cunmap <Tab>
+  silent! cunmap <S-Tab>
+  let s:tab_mapped = v:false
+endfunction
+
 " The command line always occupies the last screen line(s): nothing can
 " be physically displayed "below" it. So we anchor the popup right ABOVE
 " the cmdline (its bottom edge touches the cmdline's top edge): visually
@@ -92,6 +123,7 @@ function! fuzzyedit#popup#show(results, selected) abort
   endif
   let s:popup_id = popup_create(l:lines, l:opts)
   call s:highlight_selection(a:selected)
+  call s:enable_tab_mapping()
 endfunction
 
 " Updates the text, size and highlight of an already-open popup without
@@ -125,6 +157,7 @@ function! fuzzyedit#popup#close() abort
     call popup_close(s:popup_id)
     let s:popup_id = 0
   endif
+  call s:disable_tab_mapping()
 endfunction
 
 " True if a popup is currently displayed. Used by the navigation
