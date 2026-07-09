@@ -133,11 +133,23 @@ function! fuzzyedit#cmdline#on_cr() abort
 endfunction
 
 " Esc: closes only the popup, without leaving the command line. If the
-" popup is not shown, lets Escape cancel the command line as usual
-" (native, unchanged Vim behavior).
+" popup is not shown, aborts the command line (equivalent to a plain
+" Escape typed by the user, see the NOTE inside about why <C-c> rather
+" than <Esc> is actually returned to achieve that).
 function! fuzzyedit#cmdline#on_esc() abort
   if !fuzzyedit#popup#is_visible()
-    return "\<Esc>"
+    " NOTE: returning "\<Esc>" here would NOT abort the command-line.
+    " Per `:help c_<Esc>`, <Esc> only aborts when directly typed by the
+    " user; when it reaches the command line as the result of a mapping
+    " (which is exactly our case: this whole function is the RHS of a
+    " `cnoremap <expr> <Esc>`), Vim instead treats it like <CR> and
+    " EXECUTES the typed command -- the very opposite of what a user
+    " pressing Esc expects, and the actual cause of the reported bug
+    " (the current buffer got replaced by whatever half-typed path was
+    " on the command line). <C-c> has no such special case: it always
+    " aborts the command-line, whether typed directly or replayed
+    " through a mapping, so it's the correct fallback here.
+    return "\<C-c>"
   endif
   call fuzzyedit#popup#close()
   return ''
