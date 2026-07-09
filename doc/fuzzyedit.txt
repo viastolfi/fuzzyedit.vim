@@ -1,0 +1,505 @@
+*fuzzyedit.txt*  Fuzzy search integrated into the :edit command line
+
+                      FUZZYEDIT - Fuzzy file finder ~
+                      Pure Vim, no external dependency ~
+
+==============================================================================
+CONTENTS                                                *fuzzyedit-contents*
+
+    1. Introduction ............... |fuzzyedit-introduction|
+    2. Requirements ................ |fuzzyedit-requirements|
+    3. Usage ....................... |fuzzyedit-usage|
+    4. Keyboard navigation ......... |fuzzyedit-navigation|
+    5. Project detection ........... |fuzzyedit-project-root|
+    6. File cache .................. |fuzzyedit-cache|
+    7. Fuzzy engine ................ |fuzzyedit-fuzzy-engine|
+    8. Options ..................... |fuzzyedit-options|
+    9. Commands .................... |fuzzyedit-commands|
+   10. Internal API ................ |fuzzyedit-api|
+   11. Architecture ................ |fuzzyedit-architecture|
+   12. Performance ................. |fuzzyedit-performance|
+   13. Troubleshooting ............. |fuzzyedit-troubleshooting|
+
+==============================================================================
+1. Introduction                          *fuzzyedit* *fuzzyedit-introduction*
+
+FuzzyEdit adds a fuzzy search directly inside the |:edit| command line,
+without opening a separate interface (no FZF, no Telescope, no dedicated
+window). Vim's natural workflow is preserved: >
+
+    :e mai
+<
+While you type, a popup appears below the command line with the best
+matching files, exactly like a modern autocompletion: >
+
+    :e ma
+    ▶ src/main.c
+      src/main_test.c
+      app/main.rs
+      Makefile
+<
+Main features:
+
+    - 100% Vimscript, no C code, no external binary required.
+    - Uses only Vim's public APIs (popup_*, cmdline autocommands,
+      systemlist/globpath).
+    - Works without |fd| (automatically falls back to |find| then to pure
+      Vimscript |globpath()| if neither is available).
+    - Stays fluid on projects with several tens of thousands of files
+      (see |fuzzyedit-performance|).
+    - You never leave the command line: all navigation (arrows, Tab,
+      Enter, Escape) stays in the keyboard, in ':' mode.
+
+==============================================================================
+2. Requirements                                      *fuzzyedit-requirements*
+
+    - Vim compiled with |+popupwin| (Vim 8.2 or newer). The plugin
+      silently disables its own loading if this feature is missing (a
+      one-time informational message).
+    - No other dependency. |fd| and `git` are optional (used
+      automatically if installed and found in $PATH, for a faster cache
+      scan and native .gitignore support -- see |fuzzyedit-cache|).
+    - Tested on Vim 9.2; compatible in theory with any 8.2+ version
+      thanks to the deliberate avoidance of newer functions like
+      |setcmdline()| (see |fuzzyedit-architecture|).
+
+==============================================================================
+3. Usage                                                    *fuzzyedit-usage*
+
+Simply type |:edit| (or its abbreviation |:e|) followed by a fragment of
+the filename you're looking for: >
+
+    :e ma
+<
+From the very first letter typed after the command, a popup appears below
+the command line with up to |g:fuzzyedit_max_results| suggestions, sorted
+by descending relevance (see |fuzzyedit-fuzzy-engine|). It updates on
+every character typed or deleted.
+
+The popup disappears automatically:
+    - when you leave the command line (Enter, Escape, an implicit |:q| of
+      another command);
+    - as soon as the typed command is no longer a watched command (see
+      |g:fuzzyedit_commands|);
+    - as soon as no file matches what you've typed anymore.
+
+As long as the popup is closed, the command line behaves exactly as
+usual: nothing FuzzyEdit does interferes with |:w|, |:vsplit|, the |/|
+search, command history, etc.
+
+==============================================================================
+4. Keyboard navigation                                 *fuzzyedit-navigation*
+
+These keys only do something when the FuzzyEdit popup is actually
+displayed; in all other cases they keep their native Vim behavior
+(moving through history, normal completion, etc.), including when you
+type a non-watched command.
+
+    <Down> or <C-n> or <Tab>    Selects the next result.
+    <Up>   or <C-p> or <S-Tab>  Selects the previous result.
+                         (Selection wraps around: past the last displayed
+                         result it goes back to the first, and vice
+                         versa. <Tab>/<S-Tab> are plain aliases of
+                         <Down>/<Up>: they only move the highlight,
+                         never touching the typed text or triggering
+                         anything else.)
+    <CR> (Enter)         Replaces the typed text with the path of the
+                         currently selected file AND immediately opens
+                         that file. This is the ONLY key that modifies
+                         the command line or ends input.
+    <Esc>                Closes only the popup, without leaving the
+                         command line or discarding what you've already
+                         typed. A further Escape then restores the
+                         native behavior (cancelling the command).
+
+You never leave the command line through these keys: this is an explicit
+design principle of the plugin (see |fuzzyedit-architecture|).
+
+==============================================================================
+5. Project detection                                  *fuzzyedit-project-root*
+
+FuzzyEdit automatically determines the current project's root by walking
+up the tree from the active buffer's directory (or the current working
+directory if the buffer is unnamed), looking for one of the markers
+listed in |g:fuzzyedit_root_markers|. If no marker is found before the
+filesystem root, the current working directory (|getcwd()|) is used as
+is.
+
+The root is only detected once per command-line session (from
+|CmdlineEnter| to |CmdlineLeave|), never recomputed on every keystroke.
+
+==============================================================================
+6. File cache                                               *fuzzyedit-cache*
+
+Building the file list of a project involves a disk scan, which would be
+far too slow to redo on every keystroke. FuzzyEdit therefore builds this
+cache only once per project root, then reuses it for the whole Vim
+session.
+
+Four backends are tried in this order, depending on what's available:
+
+    1. `git ls-files` if `root` contains a `.git` and the `git`
+                   executable is found in $PATH. Respects .gitignore
+                   exactly and natively (negation, anchoring, directory
+                   patterns...), including nested .gitignore files and
+                   the user's global excludesfile, without any
+                   reimplementation of its syntax.
+    2. |fd|        if the executable is found in $PATH (very fast,
+                   respects .gitignore by default, useful outside a git
+                   repo or if `git` is not installed).
+    3. |find|      (GNU or BSD find), nearly universally available on
+                   Unix systems. Does NOT respect .gitignore.
+    4. |globpath()| a 100% Vimscript implementation, used as a last
+                   resort (works even on a machine with no external
+                   tools at all, including Windows). Also does not
+                   respect .gitignore.
+
+Regardless of the backend, the patterns in |g:fuzzyedit_ignore_patterns|
+are applied identically (via |glob2regpat()|) to filter out files to
+exclude in addition to .gitignore (or instead of it, outside a git repo
+with the |find|/|globpath()| backends).
+
+To force a full cache rebuild (after adding or removing a lot of files,
+for example), use: >
+
+    :FuzzyEditRebuildCache
+<
+See |:FuzzyEditRebuildCache|.
+
+==============================================================================
+7. Fuzzy engine                                       *fuzzyedit-fuzzy-engine*
+
+The fuzzy matching engine is a pure Vimscript implementation (no
+dependency on FZF or any external tool). It searches for your query as a
+SUBSEQUENCE of characters in each file path (the characters must appear
+in the same order, but not necessarily consecutively), then assigns a
+score that favors:
+
+    - consecutive characters (a growing bonus rewards runs of characters
+      that follow one another without interruption);
+    - matches at the very start of the path;
+    - matches right after a separator (`/`, `_`, `-`, `.`, space), which
+      favors the start of a word or path component; the `/` separator
+      (start of a directory) is rewarded slightly more than the others;
+    - camelCase-style casing boundaries (e.g. the "R" in "myRouter");
+    - a first match close to the start of the path;
+    - short paths, as a final tie-breaker.
+
+The comparison respects "smart case" (fzf/vim-style): a query typed
+entirely in lowercase ignores the case of files, but as soon as it
+contains at least one uppercase letter, the comparison becomes
+case-sensitive.
+
+Example, for the query "mr": >
+
+    main.rs
+    my_router.rs
+    src/main_router.rs
+<
+Results are always sorted by descending score, with a deterministic
+tie-breaker (increasing path length, then alphabetical order) for a
+stable and reproducible display.
+
+==============================================================================
+8. Options                                                *fuzzyedit-options*
+
+All these variables can be overridden in your vimrc, BEFORE the plugin
+loads (they are read with |get()| and are never overwritten if you have
+already defined them).
+
+                                                    *g:fuzzyedit_max_results*
+g:fuzzyedit_max_results         (number, default: 15)
+    Maximum number of results shown in the popup, and the bound of the
+    navigation range (Tab/Down/Up never move through more than this many
+    entries, even if many more files match).
+
+                                                *g:fuzzyedit_ignore_patterns*
+g:fuzzyedit_ignore_patterns     (list of glob patterns)
+    Patterns ignored when building the file cache. Default value: >
+
+    ['.git/*', '.hg/*', '.svn/*',
+     'node_modules/*', 'target/*', 'build/*', 'dist/*',
+     '*.o', '*.pyc', '*.class']
+<
+                                                  *g:fuzzyedit_root_markers*
+g:fuzzyedit_root_markers        (list of file/directory names)
+    Markers searched for while walking up the tree to determine the
+    project root (see |fuzzyedit-project-root|). Default value: >
+
+    ['.git', '.hg', '.svn', 'Makefile', 'package.json',
+     'Cargo.toml', 'go.mod']
+<
+                                                      *g:fuzzyedit_commands*
+g:fuzzyedit_commands            (list of command names, default: ['e', 'edit'])
+    Watched cmdline commands: the popup only activates if the typed
+    command (or one of its unambiguous abbreviations, e.g. "ed" for
+    "edit") matches one of the entries in this list.
+
+==============================================================================
+9. Commands                                             *fuzzyedit-commands-cmd*
+
+                                                    *:FuzzyEditRebuildCache*
+:FuzzyEditRebuildCache
+    Forces a rebuild of the file cache for the current project root (see
+    |fuzzyedit-project-root|), even if a cache already existed for that
+    root. Use this after adding, removing, or renaming a lot of files in
+    the project.
+
+                                                          *:FuzzyEditStatus*
+:FuzzyEditStatus
+    Shows a plain-text performance diagnostic: detected project root,
+    cache backend used (git/fd/find/globpath), number of cached files
+    and build time, then for the last query typed in the session:
+    whether narrowing was active, size of the search universe, number
+    of results, and time (in ms) spent in the fuzzy engine and in the
+    popup update.
+
+    This information is purely informational; the command does not
+    modify the cache or the popup state. It can be run at any time,
+    including before any use of |:edit|, or right after leaving the
+    command line (Escape) following a session that felt slow: the
+    latest figures remain available. See |fuzzyedit-troubleshooting| for
+    using it in a slowdown diagnosis.
+
+==============================================================================
+10. Internal API                                               *fuzzyedit-api*
+
+These functions are documented to make the code easier to read, test,
+and possibly extend. They are not part of a stable API guaranteed across
+versions.
+
+Orchestrator (autoload/fuzzyedit.vim) ~
+
+    fuzzyedit#start()                  Resets the session state. Called
+                                        on |CmdlineEnter|.
+    fuzzyedit#update([cmdline])        Analyzes the command line,
+                                        reruns the fuzzy search (with
+                                        incremental narrowing, see
+                                        |fuzzyedit-performance|) and
+                                        updates the popup. Called on
+                                        |CmdlineChanged|. NEVER calls
+                                        |setcmdline()|, in accordance
+                                        with that event's documentation.
+    fuzzyedit#stop()                   Closes the popup and resets the
+                                        state. Called on |CmdlineLeave|.
+    fuzzyedit#project_root([dir])      Detects the project root.
+    fuzzyedit#resolve_path(root, relpath [, cwd])
+                                        Recombines a cache-relative path
+                                        with the project root, simplified
+                                        relative to the current working
+                                        directory.
+    fuzzyedit#state()                  Returns the current internal
+                                        state (read-only, for tests/
+                                        debugging).
+    fuzzyedit#debug()                  Returns a dictionary
+                                        {root, cache, last_update} used
+                                        by |:FuzzyEditStatus|. `cache` is
+                                        the result of
+                                        fuzzyedit#cache#info(root) and
+                                        `last_update` the detail (times,
+                                        sizes) of the last call to
+                                        fuzzyedit#update().
+    fuzzyedit#nav_next() / nav_prev()  Move the current selection (used
+                                        by Down/Ctrl-N/Tab and
+                                        Up/Ctrl-P/Shift-Tab, see
+                                        |fuzzyedit-navigation|).
+    fuzzyedit#nav_complete_text()      Builds the complete command text
+                                        matching the selected entry
+                                        (used only by Enter).
+
+Command-line parsing (autoload/fuzzyedit/cmdline.vim) ~
+
+    fuzzyedit#cmdline#parse(cmdline [, commands])
+                                        PURE function: analyzes a
+                                        cmdline string and returns
+                                        {matched, cmd, bang, arg}.
+    fuzzyedit#cmdline#on_next/on_prev/on_tab/on_cr/on_esc(...)
+                                        Keyboard glue with side effects,
+                                        meant exclusively for the
+                                        plugin's |cnoremap| <expr>
+                                        mappings.
+
+File cache (autoload/fuzzyedit/cache.vim) ~
+
+    fuzzyedit#cache#get(root)          Returns (building it if needed)
+                                        the cached file list for `root`.
+    fuzzyedit#cache#build(root [, force [, backend]])
+                                        (Re)builds the cache for `root`.
+    fuzzyedit#cache#clear()            Clears the cache entirely (all
+                                        roots combined).
+    fuzzyedit#cache#info(root)         Returns the build metadata of the
+                                        cache for `root`
+                                        ({backend, count, build_ms}, or
+                                        {} if not yet built). Backs
+                                        |:FuzzyEditStatus|.
+
+Fuzzy engine (autoload/fuzzyedit/fuzzy.vim) ~
+
+    fuzzyedit#fuzzy#score(query, item) Computes the score of a single
+                                        item. Returns -1 if `query` does
+                                        not match.
+    fuzzyedit#fuzzy#search(query, items)
+                                        Filters and sorts `items` by
+                                        descending score for `query`.
+
+Popup (autoload/fuzzyedit/popup.vim) ~
+
+    fuzzyedit#popup#show(results, selected)
+    fuzzyedit#popup#update(results, selected)
+                                        Creates/updates/closes the popup
+                                        depending on the content of
+                                        `results`; the sole entry point
+                                        for popup_create()/
+                                        popup_settext().
+    fuzzyedit#popup#close()
+    fuzzyedit#popup#is_visible()       Returns v:true/v:false.
+
+==============================================================================
+11. Architecture                                        *fuzzyedit-architecture*
+
+File structure: >
+
+    plugin/fuzzyedit.vim           Entry point: options,
+                                    :FuzzyEditRebuildCache command,
+                                    autocommands, keyboard mappings.
+    autoload/fuzzyedit.vim         Central orchestrator (session state).
+    autoload/fuzzyedit/cache.vim   File list, memoized per root.
+    autoload/fuzzyedit/fuzzy.vim   Scoring and sorting, pure and free of
+                                    side effects (core compiled in Vim9
+                                    |:def|, see |fuzzyedit-performance|).
+    autoload/fuzzyedit/popup.vim   The only module allowed to call Vim's
+                                    popup_*() functions.
+    autoload/fuzzyedit/cmdline.vim Pure cmdline parsing (parse) +
+                                    keyboard glue with side effects
+                                    (on_*).
+    doc/fuzzyedit.txt              This documentation.
+<
+No internal global variable is used for the session state: everything
+lives in a script-local dictionary (`s:state`) inside
+autoload/fuzzyedit.vim, recreated on every |CmdlineEnter|. Only the user
+options (g:fuzzyedit_*, see |fuzzyedit-options|) are global, and only to
+allow their configuration from the vimrc.
+
+Notable design choices:
+
+    - The popup is anchored right ABOVE the command line (its bottom
+      edge touches the cmdline's top edge), since the cmdline always
+      occupies the last screen line: nothing can be physically displayed
+      "below" it.
+    - No modification of the command line ever happens from the
+      |CmdlineChanged| callback (forbidden by the Vim documentation):
+      any change to the typed text (Tab, Enter) goes exclusively through
+      |cnoremap| <expr> keyboard mappings, which run outside that
+      restricted callback.
+    - Replacing the typed text (Tab/Enter) uses
+      `feedkeys("\<C-u>" . text, 'n')` rather than |setcmdline()|, since
+      the latter requires Vim 9.0.0185+: the plugin thus stays
+      compatible with the targeted 8.2 versions.
+    - Many functions accept an optional override argument (e.g.
+      `fuzzyedit#update(cmdline)`, `fuzzyedit#project_root(dir)`,
+      `fuzzyedit#resolve_path(..., cwd)`) so they remain unit-testable
+      without depending on a real command-line context or fragile
+      keystroke simulation.
+
+==============================================================================
+12. Performance                                        *fuzzyedit-performance*
+
+Two independent optimizations let the plugin stay fluid on projects with
+several tens of thousands of files:
+
+1. Fuzzy engine compiled in Vim9 |:def| ~
+
+   The core of the scoring and sorting (autoload/fuzzyedit/fuzzy.vim) is
+   written as internal (compiled) Vim9 |:def| functions, called from
+   legacy `function!` wrappers that expose the unchanged public API
+   (`fuzzyedit#fuzzy#score()`/`search()`). This avoids having to rewrite
+   the whole plugin in `vim9script`, while still benefiting from Vim9
+   compilation speedups on the hottest loop. Measured gain: from
+   0.5ms/file (naive legacy Vimscript, ~11s for 21,000 files) to about
+   0.01-0.02ms/file (~0.3-0.5s for 21,000 to 50,000 files), a factor of
+   40 to 55.
+
+2. Incremental narrowing ~
+
+   When the query grows while keeping the same prefix (the normal case
+   when typing without backtracking: "m" -> "ma" -> "mai"), any file
+   candidate for the new query necessarily already matched the previous
+   one (a subsequence match for "mai" trivially implies a match for its
+   prefix "ma"). `fuzzyedit#update()` therefore reruns the search on the
+   (small) result of the previous query instead of rescanning the whole
+   cache. As soon as there is a deletion, a prefix change, or the first
+   query of the session, the plugin unconditionally falls back to a full
+   search: correctness is never sacrificed for speed. Measured gain:
+   from 1.6x to more than 2x over a realistic typing session (the gain
+   grows with the number of characters typed).
+
+Additional recommendations:
+
+    - In a git repository, no action is needed: the `git ls-files`
+      backend is used automatically and already respects .gitignore
+      (node_modules, target, build, vendor... as soon as they're listed
+      there).
+    - Outside a git repository, install |fd| if possible: it's the
+      fastest backend and it also natively respects .gitignore.
+    - Adjust |g:fuzzyedit_ignore_patterns| for additional exclusions
+      (not covered by .gitignore, or when using |find|/|globpath()| if
+      neither `git` nor `fd` is available): this reduces both the cache
+      size and the time of each search.
+
+==============================================================================
+13. Troubleshooting                                 *fuzzyedit-troubleshooting*
+
+It lags on every keystroke ~
+    Don't guess: run |:FuzzyEditStatus| (right after typing into `:e`,
+    or after an Escape if the session was too slow to inspect live) and
+    look at:
+
+    - "Project root": if this isn't the expected root (e.g. $HOME
+      instead of the current repo), the cache covers far more files
+      than necessary. Check your |g:fuzzyedit_root_markers| and the
+      directory Vim was launched from.
+    - "Cache" (file count): beyond a few tens of thousands of files,
+      first check that the displayed backend is indeed `git` or `fd`
+      (visible in |:FuzzyEditStatus|) -- they respect .gitignore and
+      therefore already exclude node_modules and the like if listed
+      there. Otherwise, install `git` or |fd|, or failing that, add
+      manual |g:fuzzyedit_ignore_patterns|.
+    - Repeated "narrowed=no": incremental narrowing (see
+      |fuzzyedit-performance|) only applies when typing additional
+      characters after the previous query; a Backspace or an edit in
+      the middle of the text forces a full recomputation over the
+      whole universe on every following keystroke.
+    - High "Search time" with "narrowed=yes": the fuzzy engine itself is
+      the bottleneck (universe too large, query too short and thus not
+      selective) rather than a cache or popup problem.
+    - High "Popup time" while "Search time" is low: the cost comes from
+      rendering (popup_settext/popup_move) or an interaction with
+      another plugin that redraws on every forced redraw (a heavy
+      statusline, for example), not from the fuzzy engine.
+
+    These figures let you distinguish a configuration problem
+    (misconfigured root or ignore patterns) from a genuine engine limit
+    on very large projects.
+
+The popup never shows up ~
+    Check `:echo has('popupwin')` (should return 1) and that the typed
+    command is indeed listed in |g:fuzzyedit_commands|.
+
+The wrong file opens / the popup shows files from another project ~
+    The project root is memoized per cmdline session; if you changed
+    your working directory without Vim detecting it, use
+    |:FuzzyEditRebuildCache| after checking |getcwd()| and your
+    |g:fuzzyedit_root_markers|.
+
+New files don't show up ~
+    The cache is only built once per project root. Run
+    |:FuzzyEditRebuildCache| after adding files.
+
+Tab/Enter/Escape don't do what's expected ~
+    These mappings only do something if the FuzzyEdit popup is shown
+    (see |fuzzyedit-navigation|). If another plugin also defines
+    |cnoremap| on these keys, load order may determine which one takes
+    effect: load FuzzyEdit last in case of conflict.
+
+==============================================================================
+vim:tw=78:ts=8:noet:ft=help:norl:
