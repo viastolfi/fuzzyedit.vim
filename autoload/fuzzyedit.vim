@@ -85,6 +85,15 @@ function! fuzzyedit#update(...) abort
     if s:state.active
       call fuzzyedit#popup#close()
       let s:state = s:new_state()
+      " popup_close() alone leaves stale pixels on screen: unlike a
+      " normal buffer redraw, Vim does not repaint the (now empty)
+      " popup area on its own right after CmdlineChanged fires here,
+      " so the suggestion list visually lingers over the command line
+      " until some unrelated redraw happens to occur. Same reasoning
+      " as the explicit `redraw` already done in nav_next()/nav_prev()
+      " below, just triggered from the parsing side instead of a
+      " keyboard mapping.
+      redraw
     endif
     return
   endif
@@ -157,6 +166,12 @@ function! fuzzyedit#update(...) abort
   " didn't exist yet, closes it if results is empty, otherwise updates
   " its content -- a single call site is enough here.
   call fuzzyedit#popup#update(s:state.results, s:state.selected)
+  " Explicit redraw for the same reason as the one in the "no longer a
+  " watched command" branch above: when results becomes empty this call
+  " closes the popup, and without a redraw the now-empty popup area
+  " stays visually stale on screen until an unrelated redraw happens.
+  " Harmless no-op cost otherwise (popup content already up to date).
+  redraw
 
   let s:last_timing = {
         \ 'root': s:state.root,
