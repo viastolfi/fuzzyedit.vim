@@ -47,6 +47,19 @@ let s:state = s:new_state()
 " behavior -- used only for performance diagnostics.
 let s:last_timing = {}
 
+" v:true while accept() is replaying the completed command line via
+" feedkeys() (see accept() below). Enter completes the text by doing
+" "\<C-u>" . full_path . "\<CR>": Vim reinserts that string into the
+" command line one character at a time, which fires CmdlineChanged for
+" every intermediate substring exactly like real typing would. Without
+" this guard, update() would treat each of those intermediate states as
+" a brand new query, re-run a full cache search and reopen/repaint the
+" popup on partial versions of the path we just chose, immediately
+" before CmdlineLeave closes it -- the visible multi-redraw "blinking"
+" on Enter. Reset in stop() (CmdlineLeave), i.e. once the replayed
+" command line has actually been submitted.
+let s:replaying = v:false
+
 " Number of entries actually shown in the popup (bounded by
 " g:fuzzyedit_max_results): this is the valid navigation range for
 " nav_next()/nav_prev()/nav_complete_text(), never the full
@@ -76,6 +89,12 @@ endfunction
 " operation (from the autocommand), no argument is passed and
 " getcmdline() is used.
 function! fuzzyedit#update(...) abort
+  if s:replaying
+    " See s:replaying above: ignore every CmdlineChanged fired while
+    " accept() is replaying the completed path, until CmdlineLeave.
+    return
+  endif
+
   let l:cmdline = get(a:000, 0, getcmdline())
   let l:parsed = fuzzyedit#cmdline#parse(l:cmdline)
 
@@ -188,6 +207,7 @@ endfunction
 function! fuzzyedit#stop() abort
   call fuzzyedit#popup#close()
   let s:state = s:new_state()
+  let s:replaying = v:false
 endfunction
 
 " Detects the project root by walking up the tree from the current
@@ -320,4 +340,23 @@ function! fuzzyedit#nav_complete_text() abort
   let l:relpath = s:state.results[s:state.selected].path
   let l:target = fuzzyedit#resolve_path(s:state.root, l:relpath)
   return s:state.cmd . (s:state.bang ? '!' : '') . ' ' . fnameescape(l:target)
+endfunction
+
+" Enter handling (cf. cmdline.vim#on_cr(), the only caller). Builds the
+" completed command line, closes the popup right away (rather than
+" waiting for the CmdlineLeave triggered by the replayed <CR> below),
+" flips s:replaying so the CmdlineChanged events fired while the text is
+" being retyped are ignored by update() (see s:replaying above), then
+" replays the completed line followed by <CR> to actually submit it.
+" Returns the string cmdline.vim#on_cr() must return to Vim ('' here:
+" the effect already happened through feedkeys()/popup#close()).
+function! fuzzyedit#accept() abort
+  let l:newline = fuzzyedit#nav_complete_text()
+  if empty(l:newline)
+    return "\<CR>"
+  endif
+  call fuzzyedit#popup#close()
+  let s:replaying = v:true
+  call feedkeys("\<C-u>" . l:newline . "\<CR>", 'n')
+  return ''
 endfunction

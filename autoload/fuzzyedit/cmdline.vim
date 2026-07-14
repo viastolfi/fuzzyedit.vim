@@ -124,12 +124,7 @@ function! fuzzyedit#cmdline#on_cr() abort
   if !fuzzyedit#popup#is_visible()
     return "\<CR>"
   endif
-  let l:newline = fuzzyedit#nav_complete_text()
-  if empty(l:newline)
-    return "\<CR>"
-  endif
-  call feedkeys("\<C-u>" . l:newline . "\<CR>", 'n')
-  return ''
+  return fuzzyedit#accept()
 endfunction
 
 " Esc: closes only the popup, without leaving the command line. If the
